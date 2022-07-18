@@ -1,0 +1,229 @@
+#*****************************************************************************#
+# Program name      : tax				                    				  #
+# Programmer Name   : Eng.Marwa Maher Mostafa                                 #
+# Database Name     : medical_db					  					      #	
+# Table Names       : DOC_INCOM ,TAX_CAL                                      #
+# Brief Decription  : A FUNCTION Calculating doctors fees and storing the doctors #
+#                              taxes info							              #
+#*****************************************************************************#
+ DATABASE   medical_db
+ define
+ #----#
+      gl_doc_fee      record like  doc_fee.*
+	 ,gl_doctor_price like   service_code.doctor_price
+	 ,gl_comp_cont    like   company.comp_cont
+	 ,gl_in_source    like   rcp_in_pat.in_source
+	 ,oper_doc        like   doctor.doc_code
+	 ,gl_price        like   fin_superv.price
+	 ,gl_to_date      date
+	 ,days_no         integer
+	 ,gl_emr_flg      char(1)
+	 ,gl_m_serv       like   service_code.m_serv
+	 ,gl_calc_surg    like   oper_calc.calc_surg_flg
+	 ,gl_calc_anth    like   oper_calc.calc_anth_flg
+	 ,gl_from,gl_to   date
+	 ,o_flg           char(1)
+           
+#******************************************************************************#
+  FUNCTION  tax_fun (gl_pes_no ,gl_inv_ser)   
+ #---------------------------------------------#
+define
+#----#
+     gl_pes_no       like   doc_fee.pes_no
+    ,gl_inv_ser      like   doc_fee.inv_ser  
+
+	let gl_doc_fee.pes_no     = gl_pes_no
+	let gl_doc_fee.inv_ser    = gl_inv_ser
+	let gl_doc_fee.disc_ratio = 0 
+	let gl_doc_fee.comp_ratio = 0 
+	let gl_in_source          = 1 
+
+   select pes_type ,comp_cont ,in_source
+     into gl_doc_fee.pes_type,gl_comp_cont,gl_in_source
+     from rcp_in_pat
+    where pes_no = gl_pes_no
+
+    if gl_in_source != 3 then #If the patient is a hospital case not a private patient
+
+       if gl_doc_fee.pes_type != 1 then  #if the patient company has a contract with the hospital
+         select discount,comp_ratio
+           into gl_doc_fee.disc_ratio ,gl_doc_fee.comp_ratio
+           from company_det
+          where comp_cont   = gl_comp_cont
+            and relate_code = 1
+       end if
+   
+#===========================================================
+#Calculating the services fees where the doctor get a certain amount of money or a spacific percentage 
+#===========================================================
+ declare m_curs cursor for
+  select a.part_code             ,a.serv_code 
+        ,a.serv_date_d           ,a.serv_time 
+	,a.doc_code              ,a.serv_price
+    into gl_doc_fee.part_code  ,gl_doc_fee.serv_code 
+	,gl_doc_fee.serv_date_d,gl_doc_fee.serv_time 
+	,gl_doc_fee.doc_code   ,gl_doc_fee.serv_price 
+    from pes_services a ,service_code b
+   where a.pes_no        =  gl_pes_no
+   and   a.serv_code     =  b.serv_code
+   and   a.doc_code is not null
+   and   a.serv_price   !=  0 
+   and   b.price_flag   !=  3
+   and   b.doctor_price !=  0
+   and   b.m_serv not in (41101,41102,41103,41104,41105,41106,41107,41108,41110,
+			  41112,41113,41116,41117,41118,41122,41123,41201,41202,
+			  41203,41204,41205,42101,42102,42103,42104,42105,42106,
+			  42107,42108,42109,42110,42111,42112,42114,42115,42116,
+			  42118,42119,42122,42123,42124,42125)
+   foreach m_curs
+
+   select m_serv
+    into  gl_m_serv
+    from  service_code 
+    where serv_code = gl_doc_fee.serv_code
+
+   if gl_m_serv = 41120 then        #In case of a patient who did a surgery
+      select calc_surg_flg 
+      into   gl_calc_surg
+      from   oper_calc
+      where  pes_no = gl_pes_no
+	and  serv_date_d = gl_doc_fee.serv_date_d
+
+      if gl_calc_surg = 2 then   #the patient is not paying for the surgery
+	   continue foreach
+      end if
+   end if
+
+   if gl_m_serv = 41121    then       #In case of anesthetization
+      select calc_surg_flg 
+      into   gl_calc_anth
+      from   oper_calc
+      where  pes_no = gl_pes_no
+	and  serv_date_d = gl_doc_fee.serv_date_d
+
+      if gl_calc_anth = 2 then    #áthe patient is not paying for the anesthetization
+	   continue foreach
+      end if
+   end if
+
+   let o_flg = 0
+   if  gl_m_serv = 41127    then       #ÝIn case of doctor consultation 
+       declare consult_curs cursor for 
+        select from_date,to_date  
+ 	  from fin_superv 
+         where pes_no    = gl_pes_no
+	   and doc_code  = gl_doc_fee.doc_code
+	   and serv_code = 4112210
+
+        foreach consult_curs
+ 	   into gl_from ,gl_to
+
+	 # If the consultation was during the hospitalization of the patient 
+	   if ((gl_doc_fee.serv_date_d >= gl_from) 
+	   and (gl_doc_fee.serv_date_d <=  gl_to)) then
+	      let o_flg = 1
+           else   
+	      let o_flg = 0
+           end if
+         end foreach
+   end if
+   if o_flg = 1 then
+      continue foreach
+   end if
+
+   select price_flag ,doctor_price           
+   into   gl_doc_fee.pay_flag , gl_doc_fee.doc_ratio 
+   from   service_code
+   where  serv_code = gl_doc_fee.serv_code
+
+   case gl_doc_fee.pay_flag 
+        when 1    #the fee is a percentage
+             let gl_doc_fee.val1   
+       		  = gl_doc_fee.doc_ratio * gl_doc_fee.serv_price / 100
+        when 2    #the fee is a specific amount of money
+             let gl_doc_fee.val1 = gl_doc_fee.doc_ratio 
+    end case
+
+   let gl_doc_fee.val1 = gl_doc_fee.val1 * ( 1 - gl_doc_fee.disc_ratio /100)
+
+   call fraction_fun(gl_doc_fee.val1)
+	returning gl_doc_fee.val1
+
+   lock table doc_fee in share mode
+
+   insert into doc_fee values (gl_doc_fee.*)
+
+   if sqlca.sqlerrd[3] = 0 then
+      rollback work
+      error "error1 has occured while dealing with the file, please try again"
+      ATTRIBUTE (BOLD,BLINK)
+   end if
+  end foreach
+#===========================================================
+#Calculating the doctors fees for medical supervision for a hospitalized patient
+#===========================================================
+  declare b_curs cursor for
+   select doc_code ,from_date ,to_date ,emr_flg ,price ,serv_code
+     into gl_doc_fee.doc_code,gl_doc_fee.serv_date_d,gl_to_date
+	 ,gl_emr_flg ,gl_price ,gl_doc_fee.serv_code
+     from fin_superv
+    where pes_no = gl_pes_no
+      and price != 0 
+    
+    initialize gl_to_date to null
+    foreach b_curs
+
+    initialize oper_doc to null
+    select doc_code    # Did that doctor do surgery to that patient    
+      into oper_doc
+      from doc_fee
+     where pes_no    = gl_pes_no
+       and doc_code  = gl_doc_fee.doc_code
+       and part_code = 64
+     group by doc_code
+
+    if oper_doc is not null then 
+       if gl_emr_flg = 0 then    # no medical supervision if the patient did surgery
+          continue foreach
+       end if
+    end if
+
+    if gl_to_date is null then    #the medical supervision ends when the patient is out of the hospital
+          let gl_to_date = TODAY  
+    end if
+
+    let days_no  = gl_to_date - gl_doc_fee.serv_date_d
+
+    select doctor_price ,price_flag 
+      into gl_doc_fee.doc_ratio , gl_doc_fee.pay_flag
+      from service_code
+      where serv_code = gl_doc_fee.serv_code
+
+    let gl_doc_fee.serv_price = days_no * gl_price
+
+    if gl_doc_fee.pay_flag = 1 then
+       let gl_doc_fee.val1 = gl_doc_fee.serv_price * gl_doc_fee.doc_ratio / 100
+    end if
+
+    if gl_doc_fee.pay_flag = 2 then
+       let gl_doc_fee.val1 = gl_doc_fee.doc_ratio * days_no * 0.8
+    end if
+
+    let gl_doc_fee.serv_time  = 12.00
+    let gl_doc_fee.part_code  = 72
+
+   let gl_doc_fee.val1 = gl_doc_fee.val1 * (1 - (gl_doc_fee.disc_ratio / 100))
+
+   lock table doc_fee in share mode
+
+   insert into doc_fee values (gl_doc_fee.*)
+
+   if sqlca.sqlerrd[3] = 0 then
+      rollback work
+      error "error2 has occured while dealing with the file, please try again"
+      ATTRIBUTE (BOLD,BLINK)
+   end if
+   end foreach
+  end if
+end function
+#******************************************************************************#
